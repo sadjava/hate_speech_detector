@@ -27,7 +27,8 @@ HATE_KEYWORDS = {
     'transphobia': ['tranny', 'trap', 'transformer', 'mentally ill', 'delusional', 'chopped off', 'mutilated', 'fake woman', 'man in dress', 'trojan horse'],
     'ableism': ['retard', 'retarded', 'sperg', 'autist', 'downs', 'mongoloid', 'cripple', 'gimp', 'psycho', 'mental case', 'brain dead'],
     'classism': ['trailer trash', 'white trash', 'welfare queen', 'food stamp', 'ghetto rat', 'hood rat', 'peasant', 'poor scum', 'bottom feeder'],
-    'general': ['die ', 'kill ', 'exterminate', 'scum', 'trash', 'vermin', 'subhuman', 'worthless', 'degenerate', 'parasite', 'cancer', 'plague', 'disease']
+    'general': ['die ', 'kill ', 'exterminate', 'scum', 'trash', 'vermin', 'subhuman', 'worthless', 'degenerate', 'parasite', 'cancer', 'plague', 'disease'],
+    'class': ['trailer trash', 'white trash', 'welfare queen', 'food stamp', 'ghetto rat', 'hood rat', 'peasant', 'poor scum', 'bottom feeder']
 }
 
 # Bad words/profanity (for non-hate cases)
@@ -319,7 +320,8 @@ def scrape_kiwifarms():
             'grooming_predator': [
                 'groomer', 'predator', 'pedophile', 'child abuse', 'minor attracted',
                 'cp', 'cheese pizza', 'loli', 'shota', 'age of consent'
-            ]
+            ],
+            'class': ['trailer trash', 'white trash', 'welfare queen', 'food stamp', 'ghetto rat', 'hood rat', 'peasant', 'poor scum', 'bottom feeder']
         }
         
         # Flatten all search terms and randomize
@@ -542,7 +544,7 @@ if __name__ == "__main__":
     # Save results
     data_dir = 'data'
     os.makedirs(data_dir, exist_ok=True)
-    output_file = os.path.join(data_dir, 'hate_speech_data.csv')
+    output_file = os.path.join(data_dir, 'parsed_data.csv')
     with open(output_file, 'a+', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(['text', 'source', 'label'])

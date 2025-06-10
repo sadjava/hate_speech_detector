@@ -1,347 +1,310 @@
 #!/usr/bin/env python3
 
 import pandas as pd
-import requests
-import json
 import random
 from typing import List, Tuple
 import time
 import argparse
-from pathlib import Path
 import os
+from enum import Enum
+from pydantic import BaseModel, Field
+
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate, FewShotChatMessagePromptTemplate
+from langchain_core.output_parsers import PydanticOutputParser
+from langchain_core.exceptions import OutputParserException
+
+class HateSpeechCategory(str, Enum):
+    """Enum for hate speech categories"""
+    RACE = "Race"
+    SEXUAL_ORIENTATION = "Sexual Orientation"
+    GENDER = "Gender"
+    PHYSICAL_APPEARANCE = "Physical Appearance"
+    RELIGION = "Religion"
+    CLASS = "Class"
+    DISABILITY = "Disability"
+    APPROPRIATE = "Appropriate"
+
+class HateSpeechClassification(BaseModel):
+    """Structured output for hate speech classification"""
+    category: HateSpeechCategory = Field(
+        description="The hate speech category that best fits the text"
+    )
 
 class FewShotLabeler:
-    def __init__(self, api_key: str = None, delay: float = 2.0):
-        # OpenRouter API configuration
-        self.api_key = api_key or os.getenv("OPENROUTER_API_KEY")
+    def __init__(self, api_key: str = None, delay: float = 1.0, model_name: str = "gpt-3.5-turbo"):
+        # OpenAI API configuration
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not self.api_key:
-            raise ValueError("OpenRouter API key is required. Get free key at https://openrouter.ai and set OPENROUTER_API_KEY environment variable")
+            raise ValueError("OpenAI API key is required. Set OPENAI_API_KEY environment variable or pass api_key parameter")
         
-        self.api_url = "https://openrouter.ai/api/v1/chat/completions"
-        self.model_name = "mistralai/mistral-7b-instruct:free"  # Free model
-        self.delay = delay  # Configurable delay between requests
+        # Initialize LangChain ChatOpenAI
+        self.llm = ChatOpenAI(
+            api_key=self.api_key,
+            model=model_name,
+            temperature=0.1,
+            max_tokens=100,
+            timeout=30
+        )
         
-        self.categories = [
-            "Race", "Sexual Orientation", "Gender", "Physical Appearance", 
-            "Religion", "Class", "Disability", "Appropriate"
-        ]
+        self.delay = delay
+        self.categories = [category.value for category in HateSpeechCategory]
         
-        print(f"Using OpenRouter with free model: {self.model_name}")
-        print(f"Rate limiting: {self.delay} seconds between requests")
+        # Setup structured output parser
+        self.parser = PydanticOutputParser(pydantic_object=HateSpeechClassification)
+        
+        # Rate limiting configuration
+        self.max_retries = 5
+        self.batch_size = 10
+        self.batch_delay = 5
+        self.save_interval = 20
+        
+        print(f"🤖 Initialized LangChain labeler with {model_name}")
+        print(f"📋 Categories: {len(self.categories)} categories")
     
-    def load_labeled_data(self, labeled_file_path: str, n_examples_per_category: int = 3) -> List[Tuple[str, str]]:
-        """Load manually labeled examples for few-shot prompting"""
-        try:
-            labeled_data = pd.read_csv(labeled_file_path)
-            print(f"Loaded {len(labeled_data)} labeled examples from {labeled_file_path}")
-            
-            # Verify required columns
-            if 'text' not in labeled_data.columns or 'category' not in labeled_data.columns:
-                raise ValueError("Labeled data must have 'text' and 'category' columns")
-                
-        except Exception as e:
-            raise ValueError(f"Error loading labeled data: {e}")
+    def load_training_examples(self, filepath: str, max_examples: int = 16) -> List[Tuple[str, str]]:
+        """Load manually labeled examples for few-shot learning"""
+        print(f"📚 Loading training examples from {filepath}")
         
-        # Create few-shot examples
+        df = pd.read_csv(filepath)
+        required_columns = ['text', 'category']
+        
+        if not all(col in df.columns for col in required_columns):
+            raise ValueError(f"Training file must have columns: {required_columns}")
+        
+        # Filter valid categories
+        valid_examples = df[df['category'].isin(self.categories)].copy()
+        
+        if len(valid_examples) == 0:
+            raise ValueError(f"No valid examples found. Categories must be one of: {self.categories}")
+        
+        # Balance examples across categories if possible
         examples = []
-        
-        print(f"Available categories in labeled data: {labeled_data['category'].unique()}")
-        
         for category in self.categories:
-            category_data = labeled_data[labeled_data['category'] == category]
-            if len(category_data) > 0:
-                # Sample examples from this category
-                n_sample = min(n_examples_per_category, len(category_data))
-                sampled = category_data.sample(n=n_sample, random_state=42)
-                for _, row in sampled.iterrows():
-                    examples.append((row['text'], row['category']))
-                print(f"  {category}: {n_sample} examples")
-            else:
-                print(f"  {category}: 0 examples (not found in data)")
+            cat_examples = valid_examples[valid_examples['category'] == category]
+            if len(cat_examples) > 0:
+                # Take up to 2 examples per category for better token efficiency
+                sample_size = min(2, len(cat_examples))
+                examples.extend([(row['text'], row['category']) for _, row in cat_examples.sample(sample_size).iterrows()])
         
-        print(f"Total few-shot examples: {len(examples)}")
+        print(f"✅ Loaded {len(examples)} training examples across {len(set(ex[1] for ex in examples))} categories")
         return examples
     
-    def create_classification_prompt(self, examples: List[Tuple[str, str]], text_to_classify: str, language: str = "en") -> List[dict]:
-        """Create messages for OpenRouter API with few-shot examples"""
+    def create_few_shot_prompt(self, examples: List[Tuple[str, str]]) -> ChatPromptTemplate:
+        """Create few-shot prompt template with structured output"""
         
-        if language == "en":
-            system_content = f"""You are an expert at classifying hate speech. Classify the given text into exactly one of these categories:
-{', '.join(self.categories)}
-
-Guidelines:
-- Race: Content targeting racial groups with slurs, stereotypes, or discrimination
-- Sexual Orientation: Content targeting LGBTQ+ individuals with slurs or discrimination  
-- Gender: Content with sexist attacks or gender-based discrimination
-- Physical Appearance: Content targeting physical traits, body shaming, appearance-based attacks
-- Religion: Content targeting religious beliefs, groups, or practices
-- Class: Content targeting socioeconomic status or class-based discrimination
-- Disability: Content targeting people with disabilities or using disability slurs
-- Appropriate: Content that doesn't contain hate speech or discrimination
-
-Examples:"""
-            
-        else:  # Russian
-            system_content = f"""Вы эксперт по классификации речи ненависти. Классифицируйте данный текст в одну из категорий:
-{', '.join(self.categories)}
-
-Примеры:"""
+        # Few-shot example template
+        example_prompt = ChatPromptTemplate.from_messages([
+            ("human", "Classify this text: {input}"),
+            ("ai", "{{\"category\": \"{output}\"}}")
+        ])
         
-        # Add few-shot examples to system message
-        for text, category in examples[:15]:  # Limit examples to avoid token limits
-            system_content += f"\nText: \"{text}\" → Category: {category}"
-        
-        system_content += "\n\nRespond with ONLY the category name, nothing else."
-        
-        # Create user message
-        if language == "en":
-            user_content = f"Classify this text:\nText: \"{text_to_classify}\"\nCategory:"
-        else:
-            user_content = f"Классифицируйте этот текст:\nТекст: \"{text_to_classify}\"\nКатегория:"
-        
-        return [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": user_content}
+        # Convert examples to format expected by LangChain
+        few_shot_examples = [
+            {"input": text, "output": category}
+            for text, category in examples
         ]
-    
-    def classify_text_with_retry(self, text: str, examples: List[Tuple[str, str]], language: str = "en", max_retries: int = 5) -> str:
-        """Classify text with exponential backoff retry logic"""
         
-        for attempt in range(max_retries):
+        # Create few-shot prompt
+        few_shot_prompt = FewShotChatMessagePromptTemplate(
+            example_prompt=example_prompt,
+            examples=few_shot_examples
+        )
+        
+        # Get format instructions and escape curly braces for LangChain
+        format_instructions = self.parser.get_format_instructions().replace("{", "{{").replace("}", "}}")
+        
+        # Main classification prompt
+        system_message = f"""You are an expert hate speech classifier. Classify text into exactly one of these categories:
+
+{', '.join(self.categories)}
+
+Category Guidelines:
+- Race: Racial slurs, stereotypes, discrimination based on race
+- Sexual Orientation: Homophobic content, discrimination against LGBTQ+
+- Gender: Sexist content, misogyny, gender-based harassment
+- Physical Appearance: Body shaming, lookism, appearance-based harassment
+- Religion: Religious discrimination, islamophobia, antisemitism
+- Class: Classist content, economic discrimination
+- Disability: Ableist content, discrimination against disabled people
+- Appropriate: Non-hateful content, normal conversation
+
+{format_instructions}
+
+Respond with valid JSON only."""
+        
+        # Complete prompt template
+        final_prompt = ChatPromptTemplate.from_messages([
+            ("system", system_message),
+            few_shot_prompt,
+            ("human", "Classify this text: {text}")
+        ])
+        return final_prompt
+    
+    def classify_with_retry(self, text: str, prompt_template: ChatPromptTemplate) -> str:
+        """Classify single text with structured output and retry logic"""
+        
+        # Create the chain
+        chain = prompt_template | self.llm | self.parser
+        
+        for attempt in range(self.max_retries):
             try:
-                messages = self.create_classification_prompt(examples, text, language)
+                # Run the chain
+                result = chain.invoke({"text": text})
                 
-                headers = {
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "http://localhost",  # Required for OpenRouter
-                    "X-Title": "Hate Speech Classifier"
-                }
+                # Extract category from structured output
+                category = result.category.value
                 
-                payload = {
-                    "model": self.model_name,
-                    "messages": messages,
-                    "max_tokens": 20,
-                    "temperature": 0.1,
-                    "top_p": 0.9
-                }
+                print(f"✅ Category: {category}")
+                return category
                 
-                response = requests.post(self.api_url, headers=headers, json=payload, timeout=30)
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    prediction = result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-                    print(f"Text: {text}")
-                    print(f"Prediction: {prediction}")
-                    print("-" * 100)
-                    
-                    # Clean up the prediction
-                    prediction = prediction.replace("Category:", "").strip()
-                    
-                    # Validate prediction is in our categories
-                    if prediction in self.categories:
-                        return prediction
-                    else:
-                        # Try partial matching
-                        for category in self.categories:
-                            if category.lower() in prediction.lower():
-                                return category
-                        
-                        print(f"Invalid prediction '{prediction}', defaulting to 'Appropriate'")
-                        return "Appropriate"
-                        
-                elif response.status_code == 401:
-                    print("Authentication failed. Check your OpenRouter API key.")
-                    print("Get a free key at: https://openrouter.ai")
+            except OutputParserException as e:
+                print(f"⚠️ Parser error (attempt {attempt + 1}): {e}")
+                if attempt == self.max_retries - 1:
                     return "Appropriate"
-                    
-                elif response.status_code == 429:
-                    # Rate limit exceeded - exponential backoff
-                    wait_time = (2 ** attempt) * self.delay  # Exponential backoff
-                    print(f"Rate limit exceeded (attempt {attempt + 1}/{max_retries}). Waiting {wait_time:.1f} seconds...")
-                    time.sleep(wait_time)
-                    continue  # Retry
-                    
-                else:
-                    print(f"API Error {response.status_code}: {response.text}")
-                    if attempt < max_retries - 1:
-                        wait_time = self.delay * (attempt + 1)
-                        print(f"Retrying in {wait_time:.1f} seconds...")
-                        time.sleep(wait_time)
-                        continue
-                    return "Appropriate"
-                    
+                time.sleep(2 ** attempt)
+                
             except Exception as e:
-                print(f"Error classifying text (attempt {attempt + 1}): {e}")
-                if attempt < max_retries - 1:
-                    wait_time = self.delay * (attempt + 1)
-                    print(f"Retrying in {wait_time:.1f} seconds...")
+                error_msg = str(e).lower()
+                
+                if "rate" in error_msg or "429" in error_msg:
+                    # Rate limit - exponential backoff
+                    wait_time = (2 ** attempt) * 3
+                    print(f"⏳ Rate limit hit, waiting {wait_time}s (attempt {attempt + 1}/{self.max_retries})")
                     time.sleep(wait_time)
                     continue
-                return "Appropriate"
+                    
+                elif "401" in error_msg or "auth" in error_msg:
+                    raise ValueError("❌ OpenAI API authentication failed. Check your API key.")
+                    
+                else:
+                    print(f"⚠️ API error (attempt {attempt + 1}): {e}")
+                    if attempt == self.max_retries - 1:
+                        return "Appropriate"
+                    time.sleep(2 ** attempt)
         
-        # All retries failed
-        print(f"All {max_retries} attempts failed for text: {text[:50]}...")
+        print(f"❌ Max retries exceeded, defaulting to 'Appropriate'")
         return "Appropriate"
     
-    def process_file(self, labeled_file_path: str, unlabeled_file_path: str, 
-                    output_file_path: str, language: str = "en", 
-                    n_examples_per_category: int = 3, batch_size: int = 5, save_frequency: int = 20):
-        """Process unlabeled data file and add category predictions with batching and auto-save"""
+    def save_progress(self, df: pd.DataFrame, output_file: str):
+        """Save current progress"""
+        df.to_csv(output_file, index=False)
+        print(f"💾 Progress saved to {output_file}")
+    
+    def label_dataset(self, training_file: str, input_file: str, output_file: str, text_column: str = "text"):
+        """Label entire dataset with few-shot learning and structured output"""
         
-        # Load examples from labeled data
-        print(f"Loading few-shot examples from {labeled_file_path}...")
-        examples = self.load_labeled_data(labeled_file_path, n_examples_per_category)
+        print(f"🚀 Starting LangChain few-shot labeling with structured output")
+        print(f"📊 Training file: {training_file}")
+        print(f"📄 Input file: {input_file}")
+        print(f"💾 Output file: {output_file}")
+        print(f"⏱️ Delay: {self.delay}s between requests")
         
-        if not examples:
-            raise ValueError("No valid examples found in labeled data")
+        # Load training examples
+        examples = self.load_training_examples(training_file)
         
-        # Load unlabeled data
-        print(f"Loading unlabeled data from {unlabeled_file_path}...")
+        # Create prompt template
+        prompt_template = self.create_few_shot_prompt(examples)
+        print(f"🎯 Created few-shot prompt with {len(examples)} examples")
+        
+        # Load input data
+        print(f"📂 Loading input data from {input_file}")
+        df = pd.read_csv(input_file)
+        
+        if text_column not in df.columns:
+            raise ValueError(f"Text column '{text_column}' not found in input file")
+        
+        # Check if we're resuming
+        start_idx = 0
+        if os.path.exists(output_file):
+            existing_df = pd.read_csv(output_file)
+            if 'category' in existing_df.columns:
+                start_idx = len(existing_df[existing_df['category'].notna()])
+                df = existing_df.copy()
+                print(f"📋 Resuming from index {start_idx}")
+        
+        # Initialize category column if not exists
+        if 'category' not in df.columns:
+            df['category'] = None
+        
+        total_texts = len(df)
+        processed = start_idx
+        
+        print(f"📝 Processing {total_texts - start_idx} texts (starting from {start_idx})")
+        
         try:
-            unlabeled_data = pd.read_csv(unlabeled_file_path)
-            print(f"Loaded {len(unlabeled_data)} texts to classify")
-            
-            if 'text' not in unlabeled_data.columns:
-                raise ValueError("Unlabeled data must have 'text' column")
+            for i in range(start_idx, total_texts):
+                text = str(df.iloc[i][text_column])
                 
-        except Exception as e:
-            raise ValueError(f"Error loading unlabeled data: {e}")
-        
-        # Check if we're resuming from a previous run
-        if os.path.exists(output_file_path):
-            try:
-                existing_results = pd.read_csv(output_file_path)
-                if 'category' in existing_results.columns and len(existing_results) > 0:
-                    start_index = len(existing_results)
-                    print(f"Resuming from index {start_index} (found existing results)")
-                    predicted_categories = existing_results['category'].tolist()
+                # Skip if already labeled
+                if pd.isna(df.iloc[i].get('category')) or df.iloc[i]['category'] == '':
+                    print(f"🔍 [{i+1}/{total_texts}] Classifying: {text[:80]}...")
+                    
+                    category = self.classify_with_retry(text, prompt_template)
+                    df.iloc[i, df.columns.get_loc('category')] = category
+                    
+                    print(f"📝 [{i+1}/{total_texts}] → {category}")
+                    processed += 1
+                    
+                    # Rate limiting
+                    time.sleep(self.delay)
+                    
+                    # Batch delay
+                    if (i + 1) % self.batch_size == 0:
+                        print(f"⏸️ Batch complete, waiting {self.batch_delay}s...")
+                        time.sleep(self.batch_delay)
+                    
+                    # Save progress periodically
+                    if (i + 1) % self.save_interval == 0:
+                        self.save_progress(df, output_file)
                 else:
-                    start_index = 0
-                    predicted_categories = []
-            except:
-                start_index = 0
-                predicted_categories = []
-        else:
-            start_index = 0
-            predicted_categories = []
+                    print(f"⏭️ [{i+1}/{total_texts}] Already labeled: {df.iloc[i]['category']}")
         
-        total_texts = len(unlabeled_data)
-        
-        print(f"Starting classification from index {start_index}/{total_texts}...")
-        print(f"Using model: {self.model_name}")
-        print(f"Batch size: {batch_size} texts, then {self.delay * batch_size:.1f}s delay")
-        
-        batch_count = 0
-        
-        for i in range(start_index, total_texts):
-            row = unlabeled_data.iloc[i]
-            text = str(row['text']).strip()
-            
-            # Skip empty texts
-            if not text or text.lower() == 'nan':
-                predicted_categories.append("Appropriate")
-                continue
-            
-            # Show progress
-            if i % 10 == 0:
-                print(f"Progress: {i+1}/{total_texts} ({((i+1)/total_texts)*100:.1f}%)")
-            
-            # Classify the text
-            category = self.classify_text_with_retry(text, examples, language)
-            predicted_categories.append(category)
-            
-            batch_count += 1
-            
-            # Batch processing with longer delays
-            if batch_count >= batch_size:
-                batch_delay = self.delay * batch_size
-                print(f"Completed batch. Waiting {batch_delay:.1f} seconds to respect rate limits...")
-                time.sleep(batch_delay)
-                batch_count = 0
-            else:
-                # Short delay between individual requests
-                time.sleep(self.delay)
-            
-            # Auto-save progress periodically
-            if (i + 1) % save_frequency == 0:
-                self.save_progress(unlabeled_data, predicted_categories, output_file_path, i + 1)
+        except KeyboardInterrupt:
+            print(f"\n⏹️ Interrupted by user. Saving progress...")
+            self.save_progress(df, output_file)
+            return
         
         # Final save
-        self.save_results(unlabeled_data, predicted_categories, output_file_path, total_texts)
-    
-    def save_progress(self, unlabeled_data: pd.DataFrame, predicted_categories: List[str], 
-                     output_file_path: str, processed_count: int):
-        """Save progress to avoid losing work"""
-        result_data = unlabeled_data.iloc[:processed_count].copy()
-        result_data['category'] = predicted_categories
-        result_data.to_csv(output_file_path, index=False)
-        print(f"Progress saved: {processed_count} texts classified")
-    
-    def save_results(self, unlabeled_data: pd.DataFrame, predicted_categories: List[str], 
-                    output_file_path: str, total_texts: int):
-        """Save final results with summary"""
-        result_data = unlabeled_data.copy()
-        result_data['category'] = predicted_categories
+        self.save_progress(df, output_file)
         
-        # Save results
-        print(f"Saving final results to {output_file_path}...")
-        result_data.to_csv(output_file_path, index=False)
+        # Summary
+        final_stats = df['category'].value_counts()
+        print(f"\n📊 Final Results:")
+        print(f"✅ Total processed: {processed}")
+        for category, count in final_stats.items():
+            print(f"   {category}: {count}")
         
-        # Print summary
-        category_counts = pd.Series(predicted_categories).value_counts()
-        print(f"\nClassification Summary:")
-        for category, count in category_counts.items():
-            percentage = (count / len(predicted_categories)) * 100
-            print(f"  {category}: {count} ({percentage:.1f}%)")
-        
-        print(f"\nCompleted! Results saved to: {output_file_path}")
+        print(f"🎉 Labeling complete! Results saved to {output_file}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Label hate speech data using few-shot learning with OpenRouter free models")
-    parser.add_argument("--labeled", required=True, help="CSV file with manually labeled examples (must have 'text' and 'category' columns)")
-    parser.add_argument("--unlabeled", required=True, help="CSV file with unlabeled data to classify (must have 'text' column)")
-    parser.add_argument("--output", required=True, help="Output CSV file with added 'category' column")
-    parser.add_argument("--language", choices=["en", "ru"], default="en", help="Language (en/ru)")
-    parser.add_argument("--examples", type=int, default=3, help="Examples per category for few-shot learning")
-    parser.add_argument("--api-key", help="OpenRouter API key (or set OPENROUTER_API_KEY environment variable)")
-    parser.add_argument("--delay", type=float, default=3.0, help="Delay between requests in seconds (default: 3.0)")
-    parser.add_argument("--batch-size", type=int, default=5, help="Batch size before longer delay (default: 5)")
-    parser.add_argument("--save-frequency", type=int, default=20, help="Save progress every N classifications (default: 20)")
+    parser = argparse.ArgumentParser(description="LangChain few-shot hate speech labeling with structured output")
+    parser.add_argument("--training", required=True, help="CSV file with manually labeled examples (text,category columns)")
+    parser.add_argument("--input", required=True, help="CSV file with texts to label")
+    parser.add_argument("--output", required=True, help="Output CSV file with labels")
+    parser.add_argument("--text-column", default="text", help="Name of text column in input file")
+    parser.add_argument("--model", default="gpt-3.5-turbo", help="OpenAI model to use")
+    parser.add_argument("--delay", type=float, default=1.0, help="Delay between API calls")
+    parser.add_argument("--api-key", help="OpenAI API key (or set OPENAI_API_KEY env var)")
     
     args = parser.parse_args()
     
-    # Validate input files exist
-    if not Path(args.labeled).exists():
-        print(f"Error: Labeled file not found: {args.labeled}")
-        return 1
-    
-    if not Path(args.unlabeled).exists():
-        print(f"Error: Unlabeled file not found: {args.unlabeled}")
-        return 1
-    
     try:
-        # Initialize labeler with custom delay
-        labeler = FewShotLabeler(api_key=args.api_key, delay=args.delay)
+        labeler = FewShotLabeler(
+            api_key=args.api_key,
+            delay=args.delay,
+            model_name=args.model
+        )
         
-        # Process the files
-        labeler.process_file(
-            labeled_file_path=args.labeled,
-            unlabeled_file_path=args.unlabeled,
-            output_file_path=args.output,
-            language=args.language,
-            n_examples_per_category=args.examples,
-            batch_size=args.batch_size,
-            save_frequency=args.save_frequency
+        labeler.label_dataset(
+            training_file=args.training,
+            input_file=args.input,
+            output_file=args.output,
+            text_column=args.text_column
         )
         
     except Exception as e:
-        print(f"Error: {e}")
-        print("\nTips for rate limiting:")
-        print("- Increase --delay (try 5.0 or 10.0 seconds)")
-        print("- Reduce --batch-size (try 3 or 1)")
-        print("- Use different free models")
-        print("- Consider upgrading to paid tier")
+        print(f"❌ Error: {e}")
         return 1
     
     return 0
