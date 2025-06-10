@@ -234,10 +234,9 @@ hate_speech_detector/
 
 | Metric | Value |
 |--------|-------|
-| **Training Samples** | 10,000+ |
+| **Training Samples** | 1,700+ |
 | **Languages** | English, Serbian |
 | **Categories** | 8 classes |
-| **Training Time** | 6-8 hours (GPU) |
 | **Model Size** | 560M parameters |
 
 ---
@@ -270,41 +269,6 @@ text = "Ti ljudi ne zaslužuju da žive ovde."
 
 ---
 
-## 🤝 Contributing
-
-We welcome contributions! Here's how you can help:
-
-### 🛠️ **Ways to Contribute**
-
-- 🐛 **Bug Reports**: Found an issue? [Open an issue](https://github.com/sadjava/hate_speech_detector/issues)
-- 💡 **Feature Requests**: Have an idea? [Suggest a feature](https://github.com/sadjava/hate_speech_detector/issues)
-- 📊 **Data Contributions**: Help improve the model with more diverse datasets
-- 🌍 **Translations**: Add support for more languages
-- 🔧 **Code Improvements**: Submit pull requests with enhancements
-
-### 📋 **Development Setup**
-
-```bash
-# Fork and clone the repository
-git clone https://github.com/YOUR_USERNAME/hate_speech_detector.git
-cd hate_speech_detector
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install development dependencies
-pip install -r requirements.txt
-pip install -r requirements-dev.txt
-
-# Run tests
-python -m pytest tests/
-
-# Start developing!
-```
-
----
-
 ## 📝 Research & Citations
 
 ### 📚 **Related Work**
@@ -321,7 +285,7 @@ If you use this project in your research, please cite:
 
 ```bibtex
 @misc{multilingual-hate-speech-detector-2024,
-  author = {sadjava},
+  author = {Dzhavid Sadreddinov, Dmitriy Dydalin, Amir Bikineyev },
   title = {Multilingual Hate Speech Detector: Explainable AI for English and Serbian Text},
   year = {2024},
   publisher = {GitHub},
