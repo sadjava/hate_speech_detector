@@ -159,17 +159,15 @@ The dataset covers 8 hate speech categories:
 ### 3.2 Evaluation Setup
 
 #### Data Split
-- **Training**: 70% (~1,190 samples)
-- **Validation**: 15% (~255 samples)
-- **Test**: 15% (~255 samples)
+- **Training**: 80% (~1360 samples)
+- **Validation**: 20% (~340 samples)
 - **Total**: ~1,700 samples (Real + Synthetic, English + Serbian)
 - **Stratification**: Maintains category distribution across languages and data types
 
 #### Metrics
 - **Primary**: F1-score (macro-averaged)
 - **Secondary**: Precision, Recall, Accuracy
-- **Cross-validation**: 5-fold stratified
-
+- 
 ---
 
 ## 4. 📈 Results
@@ -189,7 +187,7 @@ The dataset covers 8 hate speech categories:
 
 ![Confusion Matrix](assets/confusion_matrix.png)
 
-The confusion matrix shows strong performance across all categories, with particularly high accuracy for Religion (91%) and appropriate content (90%).
+The confusion matrix shows strong performance across all categories.
 
 ### 4.3 Per-Category Performance
 
